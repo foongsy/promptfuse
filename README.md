@@ -1,5 +1,7 @@
 # promptfuse
 
+[![ci](https://github.com/foongsy/promptfuse/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/foongsy/promptfuse/actions/workflows/ci.yml)
+
 Local prompt registry with a Langfuse-compatible prompt API. Prompts are stored in a YAML tree, in SQLite, or in SQLite with the YAML tree as the seed. `promptfuse` does not call Langfuse Cloud and does not send traces.
 
 This document is the contract for the public API.
