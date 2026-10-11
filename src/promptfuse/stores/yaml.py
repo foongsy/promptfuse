@@ -165,7 +165,8 @@ class YamlStore:
 
     def _read_version(self, name: str, version: int, path: Path) -> StoredVersion:
         try:
-            text = path.read_text(encoding="utf-8")
+            with path.open(encoding="utf-8", newline="") as stream:
+                text = stream.read()
         except OSError as exc:
             raise PromptStoreError(f"could not read prompt file: {path}") from exc
         try:
@@ -192,7 +193,7 @@ class YamlStore:
                 raise InvalidPromptRequest(
                     f"text prompt must use the markdown body, not frontmatter prompt: {name}@{version}"
                 )
-            prompt = normalize_prompt("text", body.removesuffix("\n"))
+            prompt = normalize_prompt("text", body)
         else:
             if body.strip():
                 raise InvalidPromptRequest(
@@ -292,7 +293,7 @@ def _serialize_version(record: StoredVersion) -> str:
     dumped = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
     if record.type == "text":
         assert isinstance(record.prompt, str)
-        return f"---\n{dumped}---\n{record.prompt}\n"
+        return f"---\n{dumped}---\n{record.prompt}"
     return f"---\n{dumped}---\n"
 
 
@@ -336,7 +337,8 @@ def _legacy_yaml_version_number(filename: str) -> int | None:
 def _atomic_write(path: Path, text: str) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     try:
-        temporary.write_text(text, encoding="utf-8")
+        with temporary.open("w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
         os.replace(temporary, path)
     except OSError as exc:
         raise PromptStoreError(f"could not write {path}") from exc

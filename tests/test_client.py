@@ -89,7 +89,7 @@ def test_sqlite_outage_uses_snapshot_before_yaml(tmp_path: Path) -> None:
 
     empty_snapshot = tmp_path / "empty.json"
     seeded = Promptfuse(yaml_dir=yaml_dir, sqlite_path=broken, snapshot_path=empty_snapshot)
-    assert seeded.get_prompt("movie-critic").prompt == "from-yaml"
+    assert seeded.get_prompt("movie-critic").prompt == "from-yaml\n"
 
 
 def test_import_yaml_copies_labels_and_keeps_sqlite_only_versions(tmp_path: Path) -> None:
@@ -116,7 +116,7 @@ def test_import_yaml_copies_labels_and_keeps_sqlite_only_versions(tmp_path: Path
         client.get_prompt("movie-critic", label="staging")
     text = (yaml_dir / "movie-critic" / "v1.md").read_text(encoding="utf-8")
     (yaml_dir / "movie-critic" / "v1.md").write_text(
-        text.replace("\nv1\n", "\nchanged\n"),
+        text.replace("\nv1", "\nchanged"),
         encoding="utf-8",
     )
     with pytest.raises(InvalidPromptRequest):

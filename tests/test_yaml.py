@@ -32,7 +32,7 @@ def _write_text_prompt(
         frontmatter.update(frontmatter_extra)
     dumped = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
     path = directory / (file_name or f"v{version}.md")
-    path.write_text(f"---\n{dumped}---\n{body}\n", encoding="utf-8")
+    path.write_bytes(f"---\n{dumped}---\n{body}".encode("utf-8"))
 
 
 def test_parent_and_child_prompts_coexist(tmp_path: Path) -> None:
@@ -99,8 +99,13 @@ def test_path_escape_is_rejected(tmp_path: Path) -> None:
         registry.get_prompt("missing/prompt")
 
 
-def test_text_markdown_round_trip_preserves_body(tmp_path: Path) -> None:
-    body = "# Title\n\nYou are a {{persona}}.\n\n- item one\n- item two"
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize("trailing_newlines", [0, 1, 2])
+def test_text_markdown_round_trip_preserves_body(
+    tmp_path: Path, newline: str, trailing_newlines: int
+) -> None:
+    body = newline.join(["# Title", "", "You are a {{persona}}.", "", "- item one", "- item two"])
+    body += newline * trailing_newlines
     registry = Registry(YamlStore(tmp_path))
     registry.create_prompt(
         name="deep-agent/system",
@@ -111,14 +116,22 @@ def test_text_markdown_round_trip_preserves_body(tmp_path: Path) -> None:
         tags=["deep-agent"],
         commit_message="initial",
     )
-    text = (tmp_path / "deep-agent" / "system" / "v1.md").read_text(encoding="utf-8")
+    text = (tmp_path / "deep-agent" / "system" / "v1.md").read_bytes().decode("utf-8")
     assert text.startswith("---\n")
     assert "prompt:" not in text.split("---", 2)[1]
-    assert body in text
+    assert text.split("---\n", 2)[2] == body
     loaded = registry.get_prompt("deep-agent/system")
     assert loaded.prompt == body
     assert loaded.config == {"model": "gpt-4.1"}
     assert loaded.tags == ("deep-agent",)
+
+
+@pytest.mark.parametrize("ending", ["\n", "\n\n", "\r\n"])
+def test_hand_authored_text_preserves_trailing_newlines(tmp_path: Path, ending: str) -> None:
+    body = "You are a {{persona}}." + ending
+    _write_text_prompt(tmp_path, "deep-agent/system", 1, body)
+    loaded = Registry(YamlStore(tmp_path)).get_prompt("deep-agent/system", version=1)
+    assert loaded.prompt == body
 
 
 def test_chat_round_trip_uses_frontmatter_prompt(tmp_path: Path) -> None:
