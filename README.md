@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/foongsy/promptfuse/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/foongsy/promptfuse/actions/workflows/ci.yml)
 
-Local prompt registry with a Langfuse-compatible prompt API. Prompts are stored in a YAML tree, in SQLite, or in SQLite with the YAML tree as the seed. `promptfuse` does not call Langfuse Cloud and does not send traces.
+Local prompt registry with a Langfuse-compatible prompt API. Prompts are stored in a Markdown seed tree (YAML frontmatter), in SQLite, or in SQLite with the seed tree as the source. `promptfuse` does not call Langfuse Cloud and does not send traces.
 
 This document is the contract for the public API.
 
@@ -22,14 +22,14 @@ pip install promptfuse
 from promptfuse import Promptfuse
 
 client = Promptfuse(
-    yaml_dir="prompts",       # optional YAML store
+    yaml_dir="prompts",       # optional Markdown seed tree
     sqlite_path="prompts.db", # optional SQLite store
     snapshot_path=None,       # optional disk cache of successful reads
     cache_ttl_seconds=60,     # default; 0 disables the memory cache
 )
 ```
 
-At least one of `yaml_dir` and `sqlite_path` is required. See [Stores](#stores) for which one is read and written.
+At least one of `yaml_dir` and `sqlite_path` is required. See [Stores](#stores) for which one is read and written. The constructor argument remains `yaml_dir` for compatibility; version files under it are Markdown.
 
 ```python
 prompt = client.get_prompt("deep-agent/system")
@@ -207,38 +207,41 @@ prompt.is_fallback  # True only when the stores and the cache could not answer
 
 ## Stores
 
-YAML and SQLite store the same prompt record. The memory cache sits in front of both.
+The Markdown seed tree and SQLite store the same prompt record. The memory cache sits in front of both.
 
 | Constructor | Source of truth | Writes |
 |---|---|---|
-| `yaml_dir` only | YAML | YAML |
+| `yaml_dir` only | Markdown seed tree | Markdown seed tree |
 | `sqlite_path` only | SQLite | SQLite |
 | both | SQLite, when it can be opened | SQLite |
 
-A healthy SQLite database that does not contain the prompt raises `PromptNotFound`. It does not continue into YAML. YAML is consulted when SQLite cannot be opened or a query fails, and when SQLite was not configured.
+A healthy SQLite database that does not contain the prompt raises `PromptNotFound`. It does not continue into the seed tree. The seed tree is consulted when SQLite cannot be opened or a query fails, and when SQLite was not configured.
 
-### YAML
+### Markdown seed tree
+
+Breaking change from 0.1.x: version files are `vN.md` with YAML frontmatter. Legacy `vN.yaml` version files are rejected.
 
 ```text
 prompts/
 ├── index.yaml
 └── deep-agent/
     └── system/
-        ├── v1.yaml
-        └── v2.yaml
+        ├── v1.md
+        └── v2.md
 ```
 
-The directory under `yaml_dir` is the prompt name. `deep-agent/system/v2.yaml` is version 2 of `deep-agent/system`. The file stem must be `v` plus the integer version. Names must not contain `..` or escape `yaml_dir`.
+The directory under `yaml_dir` is the prompt name. `deep-agent/system/v2.md` is version 2 of `deep-agent/system`. The file stem must be `v` plus the integer version, and the suffix must be `.md`. Names must not contain `..` or escape `yaml_dir`.
 
 Version files are immutable. A label change edits `index.yaml` only.
 
-```yaml
-# prompts/deep-agent/system/v1.yaml
+A text prompt uses the Markdown body as the prompt string. Frontmatter must not include `prompt`:
+
+```markdown
+# prompts/deep-agent/system/v1.md
+---
 name: deep-agent/system
 version: 1
 type: text
-prompt: |
-  You are a {{persona}} research assistant.
 config:
   model: gpt-4.1
   temperature: 0.2
@@ -246,9 +249,32 @@ tags: ["deep-agent", "system"]
 commit_message: initial system prompt
 created_at: "2026-09-28T00:00:00Z"
 updated_at: "2026-09-28T00:00:00Z"
+---
+You are a {{persona}} research assistant.
 ```
 
-`name` and `version` in the file must match the path. `type` is `text` or `chat`. For `chat`, `prompt` is the message list. `config`, `tags`, `commit_message`, `created_at`, and `updated_at` may be omitted.
+A chat prompt keeps the message list in frontmatter under `prompt`. The Markdown body must be empty (whitespace only). Role markers in the body are not supported yet:
+
+```markdown
+# prompts/movie-critic-chat/v1.md
+---
+name: movie-critic-chat
+version: 1
+type: chat
+prompt:
+  - role: system
+    content: You are a {{criticLevel}} movie critic.
+  - type: placeholder
+    name: chat_history
+config: {}
+tags: []
+commit_message: null
+created_at: "2026-09-28T00:00:00Z"
+updated_at: "2026-09-28T00:00:00Z"
+---
+```
+
+`name` and `version` in the frontmatter must match the path. `type` is `text` or `chat`. `config`, `tags`, `commit_message`, `created_at`, and `updated_at` may be omitted.
 
 ```yaml
 # prompts/index.yaml
@@ -259,9 +285,9 @@ prompts:
     production: 1
 ```
 
-Index values are integers. A label points at one version. `latest` must not appear in the index; the highest `vN.yaml` for that name is `latest`. A version file does not list its labels.
+Index values are integers. A label points at one version. `latest` must not appear in the index; the highest `vN.md` for that name is `latest`. A version file does not list its labels.
 
-`create_prompt` writes `vN.yaml` and updates the index. `update_prompt` updates the index only. Neither rewrites an existing `vN.yaml`.
+`create_prompt` writes `vN.md` and updates the index. `update_prompt` updates the index only. Neither rewrites an existing `vN.md`.
 
 ### SQLite
 
@@ -294,11 +320,11 @@ CREATE TABLE prompt_label (
 
 ### Using both
 
-`import_yaml()` copies the YAML tree into SQLite.
+`import_yaml()` copies the Markdown seed tree into SQLite.
 
-- A YAML version that is not in SQLite is inserted.
-- A YAML version that is already in SQLite with the same body, `type`, `config`, `tags`, and `commit_message` is left as stored.
-- A YAML version whose stored body differs raises `InvalidPromptRequest`. Versions stay immutable.
+- A seed version that is not in SQLite is inserted.
+- A seed version that is already in SQLite with the same body, `type`, `config`, `tags`, and `commit_message` is left as stored.
+- A seed version whose stored body differs raises `InvalidPromptRequest`. Versions stay immutable.
 - Labels in `index.yaml` replace the SQLite label rows for names present in the index. SQLite versions that exist only in SQLite are kept.
 - `latest` is recomputed as the highest version after the import.
 
@@ -308,17 +334,17 @@ CREATE TABLE prompt_label (
 
 `snapshot_path` is a JSON file of prompt clients from successful store reads. It is a cache. It is not edited by hand and it is not a third source of truth.
 
-On a store outage, `get_prompt` uses the snapshot entry for that cache key when the memory cache is empty. A missing snapshot entry then uses YAML if SQLite failed and `yaml_dir` is set. A snapshot hit sets `is_fallback` to `False`.
+On a store outage, `get_prompt` uses the snapshot entry for that cache key when the memory cache is empty. A missing snapshot entry then uses the seed tree if SQLite failed and `yaml_dir` is set. A snapshot hit sets `is_fallback` to `False`.
 
-The snapshot is updated after a successful SQLite or YAML read. A fallback client is not written to the snapshot.
+The snapshot is updated after a successful SQLite or seed-tree read. A fallback client is not written to the snapshot.
 
 ## Errors
 
 | Exception | When |
 |---|---|
 | `PromptNotFound` | Unknown name, label, or version. `type` does not match the stored prompt. SQLite is healthy and the row is absent. |
-| `InvalidPromptRequest` | `label` and `version` both set. `type` changes on `create_prompt`. `"latest"` is assigned by the caller or written in `index.yaml`. A version file disagrees with its path. `import_yaml()` finds a body that differs from SQLite. The YAML path escapes `yaml_dir`. |
-| `PromptStoreError` | SQLite cannot be opened or a query fails, and snapshot, YAML, and `fallback` do not produce a client. |
+| `InvalidPromptRequest` | `label` and `version` both set. `type` changes on `create_prompt`. `"latest"` is assigned by the caller or written in `index.yaml`. A version file disagrees with its path. A text prompt puts `prompt` in frontmatter. A chat prompt has a non-empty Markdown body. A legacy `vN.yaml` version file is present. `import_yaml()` finds a body that differs from SQLite. The seed path escapes `yaml_dir`. |
+| `PromptStoreError` | SQLite cannot be opened or a query fails, and snapshot, seed tree, and `fallback` do not produce a client. |
 
 `PromptNotFound` and `InvalidPromptRequest` are not retried through the seed files when SQLite is healthy.
 
