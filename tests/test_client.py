@@ -55,7 +55,7 @@ def test_healthy_sqlite_miss_does_not_read_yaml(tmp_path: Path) -> None:
         client.get_prompt("movie-critic")
     client.create_prompt(name="movie-critic", type="text", prompt="from-sqlite", labels=["production"])
     assert client.get_prompt("movie-critic").prompt == "from-sqlite"
-    assert "from-sqlite" not in (yaml_dir / "movie-critic" / "v1.yaml").read_text(encoding="utf-8")
+    assert "from-sqlite" not in (yaml_dir / "movie-critic" / "v1.md").read_text(encoding="utf-8")
 
 
 def test_sqlite_outage_uses_snapshot_before_yaml(tmp_path: Path) -> None:
@@ -67,12 +67,15 @@ def test_sqlite_outage_uses_snapshot_before_yaml(tmp_path: Path) -> None:
     assert client.get_prompt("movie-critic").prompt == "from-sqlite"
     version = yaml_dir / "movie-critic"
     version.mkdir(parents=True)
-    (version / "v1.yaml").write_text(
-        yaml.safe_dump(
-            {"name": "movie-critic", "version": 1, "type": "text", "prompt": "from-yaml"}
-        ),
-        encoding="utf-8",
-    )
+    frontmatter = {
+        "name": "movie-critic",
+        "version": 1,
+        "type": "text",
+        "config": {},
+        "tags": [],
+    }
+    dumped = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
+    (version / "v1.md").write_text(f"---\n{dumped}---\nfrom-yaml\n", encoding="utf-8")
     (yaml_dir / "index.yaml").write_text(
         yaml.safe_dump({"prompts": {"movie-critic": {"production": 1}}}),
         encoding="utf-8",
@@ -86,7 +89,7 @@ def test_sqlite_outage_uses_snapshot_before_yaml(tmp_path: Path) -> None:
 
     empty_snapshot = tmp_path / "empty.json"
     seeded = Promptfuse(yaml_dir=yaml_dir, sqlite_path=broken, snapshot_path=empty_snapshot)
-    assert seeded.get_prompt("movie-critic").prompt == "from-yaml"
+    assert seeded.get_prompt("movie-critic").prompt == "from-yaml\n"
 
 
 def test_import_yaml_copies_labels_and_keeps_sqlite_only_versions(tmp_path: Path) -> None:
@@ -111,9 +114,9 @@ def test_import_yaml_copies_labels_and_keeps_sqlite_only_versions(tmp_path: Path
     client.import_yaml()
     with pytest.raises(PromptNotFound):
         client.get_prompt("movie-critic", label="staging")
-    text = (yaml_dir / "movie-critic" / "v1.yaml").read_text(encoding="utf-8")
-    (yaml_dir / "movie-critic" / "v1.yaml").write_text(
-        text.replace("prompt: v1", "prompt: changed"),
+    text = (yaml_dir / "movie-critic" / "v1.md").read_text(encoding="utf-8")
+    (yaml_dir / "movie-critic" / "v1.md").write_text(
+        text.replace("\nv1", "\nchanged"),
         encoding="utf-8",
     )
     with pytest.raises(InvalidPromptRequest):

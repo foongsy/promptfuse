@@ -1,8 +1,9 @@
-"""YAML prompt tree. The directory path is the prompt name, and ``vN.yaml`` is the version."""
+"""Markdown prompt tree. The directory path is the prompt name, and ``vN.md`` is the version."""
 
 from __future__ import annotations
 
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ from promptfuse.models import normalize_prompt
 from promptfuse.registry import validate_name
 from promptfuse.stores.protocol import StoredVersion
 
+_CLOSING_FRONTMATTER_RE = re.compile(r"(?m)^---[ \t]*(?:\r?\n|\Z)")
+
 
 class YamlStore:
     """Immutable version files plus a mutable label index."""
@@ -24,6 +27,8 @@ class YamlStore:
 
     def get_version(self, name: str, version: int) -> StoredVersion | None:
         with self._lock:
+            directory = self._prompt_dir(name)
+            self._reject_legacy_yaml(directory)
             path = self._version_path(name, version)
             if not path.is_file():
                 return None
@@ -47,6 +52,7 @@ class YamlStore:
             directory = self._prompt_dir(name)
             if not directory.is_dir():
                 return []
+            self._reject_legacy_yaml(directory)
             versions: list[int] = []
             for entry in directory.iterdir():
                 if entry.is_file():
@@ -63,6 +69,7 @@ class YamlStore:
             root = self._root.resolve()
             for dirpath, _dirnames, filenames in os.walk(root):
                 current = Path(dirpath).resolve()
+                self._reject_legacy_yaml_names(filenames, current)
                 if current == root:
                     if any(_version_number(name) is not None for name in filenames):
                         raise InvalidPromptRequest("version files must live under a prompt name")
@@ -92,24 +99,15 @@ class YamlStore:
 
     def insert_version(self, record: StoredVersion) -> None:
         with self._lock:
+            directory = self._prompt_dir(record.name)
+            self._reject_legacy_yaml(directory)
             path = self._version_path(record.name, record.version)
             if path.exists():
                 raise InvalidPromptRequest(
                     f"prompt version already exists: {record.name}@{record.version}"
                 )
             path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "name": record.name,
-                "version": record.version,
-                "type": record.type,
-                "prompt": record.prompt,
-                "config": record.config,
-                "tags": list(record.tags),
-                "commit_message": record.commit_message,
-                "created_at": record.created_at,
-                "updated_at": record.updated_at,
-            }
-            _atomic_write(path, yaml.safe_dump(payload, sort_keys=False, allow_unicode=True))
+            _atomic_write(path, _serialize_version(record))
 
     def set_label(self, name: str, label: str, version: int) -> None:
         with self._lock:
@@ -147,26 +145,64 @@ class YamlStore:
         return path
 
     def _version_path(self, name: str, version: int) -> Path:
-        return self._prompt_dir(name) / f"v{version}.yaml"
+        return self._prompt_dir(name) / f"v{version}.md"
+
+    def _reject_legacy_yaml(self, directory: Path) -> None:
+        if not directory.is_dir():
+            return
+        for entry in directory.iterdir():
+            if entry.is_file() and _legacy_yaml_version_number(entry.name) is not None:
+                raise InvalidPromptRequest(
+                    f"legacy yaml version file is not supported: {entry.name}"
+                )
+
+    def _reject_legacy_yaml_names(self, filenames: list[str], _directory: Path) -> None:
+        for filename in filenames:
+            if _legacy_yaml_version_number(filename) is not None:
+                raise InvalidPromptRequest(
+                    f"legacy yaml version file is not supported: {filename}"
+                )
 
     def _read_version(self, name: str, version: int, path: Path) -> StoredVersion:
         try:
-            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            with path.open(encoding="utf-8", newline="") as stream:
+                text = stream.read()
         except OSError as exc:
             raise PromptStoreError(f"could not read prompt file: {path}") from exc
+        try:
+            frontmatter, body = _split_frontmatter(text)
+        except InvalidPromptRequest as exc:
+            raise InvalidPromptRequest(f"{exc}: {name}@{version}") from exc
+        try:
+            loaded = yaml.safe_load(frontmatter)
         except yaml.YAMLError as exc:
-            raise InvalidPromptRequest(f"prompt file is not valid YAML: {name}@{version}") from exc
+            raise InvalidPromptRequest(
+                f"prompt frontmatter is not valid YAML: {name}@{version}"
+            ) from exc
+        if loaded is None:
+            loaded = {}
         if not isinstance(loaded, dict):
-            raise InvalidPromptRequest(f"prompt file is not a mapping: {name}@{version}")
+            raise InvalidPromptRequest(f"prompt frontmatter is not a mapping: {name}@{version}")
         if loaded.get("name") != name or loaded.get("version") != version:
             raise InvalidPromptRequest(f"prompt file disagrees with its path: {name}@{version}")
         prompt_type = loaded.get("type")
         if prompt_type not in ("text", "chat"):
             raise InvalidPromptRequest(f"prompt type is missing: {name}@{version}")
-        try:
-            prompt = normalize_prompt(prompt_type, loaded.get("prompt"))
-        except InvalidPromptRequest:
-            raise
+        if prompt_type == "text":
+            if "prompt" in loaded:
+                raise InvalidPromptRequest(
+                    f"text prompt must use the markdown body, not frontmatter prompt: {name}@{version}"
+                )
+            prompt = normalize_prompt("text", body)
+        else:
+            if body.strip():
+                raise InvalidPromptRequest(
+                    f"chat prompt markdown body must be empty: {name}@{version}"
+                )
+            try:
+                prompt = normalize_prompt("chat", loaded.get("prompt"))
+            except InvalidPromptRequest:
+                raise
         config = loaded.get("config", {})
         if config is None:
             config = {}
@@ -241,9 +277,42 @@ class YamlStore:
         )
 
 
-def _version_number(filename: str) -> int | None:
+def _serialize_version(record: StoredVersion) -> str:
+    frontmatter: dict[str, Any] = {
+        "name": record.name,
+        "version": record.version,
+        "type": record.type,
+    }
+    if record.type == "chat":
+        frontmatter["prompt"] = record.prompt
+    frontmatter["config"] = record.config
+    frontmatter["tags"] = list(record.tags)
+    frontmatter["commit_message"] = record.commit_message
+    frontmatter["created_at"] = record.created_at
+    frontmatter["updated_at"] = record.updated_at
+    dumped = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
+    if record.type == "text":
+        assert isinstance(record.prompt, str)
+        return f"---\n{dumped}---\n{record.prompt}"
+    return f"---\n{dumped}---\n"
+
+
+def _split_frontmatter(text: str) -> tuple[str, str]:
+    if text.startswith("---\r\n"):
+        rest = text[5:]
+    elif text.startswith("---\n"):
+        rest = text[4:]
+    else:
+        raise InvalidPromptRequest("prompt file must start with YAML frontmatter")
+    match = _CLOSING_FRONTMATTER_RE.search(rest)
+    if match is None:
+        raise InvalidPromptRequest("prompt file must start with YAML frontmatter")
+    return rest[: match.start()], rest[match.end() :]
+
+
+def _version_stem(filename: str, suffix: str) -> int | None:
     path = Path(filename)
-    if path.suffix != ".yaml":
+    if path.suffix != suffix:
         return None
     stem = path.stem
     if len(stem) < 2 or not stem.startswith("v"):
@@ -257,10 +326,19 @@ def _version_number(filename: str) -> int | None:
     return value
 
 
+def _version_number(filename: str) -> int | None:
+    return _version_stem(filename, ".md")
+
+
+def _legacy_yaml_version_number(filename: str) -> int | None:
+    return _version_stem(filename, ".yaml")
+
+
 def _atomic_write(path: Path, text: str) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     try:
-        temporary.write_text(text, encoding="utf-8")
+        with temporary.open("w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
         os.replace(temporary, path)
     except OSError as exc:
         raise PromptStoreError(f"could not write {path}") from exc
